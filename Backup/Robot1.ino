@@ -1,0 +1,357 @@
+//Last version before I installed the Exponential Filter
+
+
+/*
+This version has working battery monitor function. There is some
+other issue causing the robot to run away!
+
+ATtiny85, 2 motors, LED, two sensors
+Sensor stuff:
+	both white	:	no prior	:	random walk
+				:	prior		:	turn in direction of last black
+
+	one white	:	ideal situation, move straight
+
+	both black	:	no prior	:	random walk
+				:	prior		:	turn in direction of last white
+This code was written by Eric Heisler (shlonkin)
+It is in the public domain, so do what you will with it.
+*/
+#include "Arduino.h"
+// Here are some parameters that you need to adjust for your setup
+// Base speeds are the motor pwm values. Adjust them for desired motor speeds.
+#define baseLeftSpeed 30 //22
+#define baseRightSpeed 30 //22
+
+// This determines sensitivity in detecting black and white
+// measurment is considered white if it is > whiteValue*n/4
+// where n is the value below. n should satisfy 0<n<4
+// A reasonable value is 3. Fractions are acceptable.
+#define leftSensitivity 3  //3
+#define rightSensitivity 3 //3
+
+// the pin definitions
+#define lmotorpin 1 // PB1 pin 6
+#define rmotorpin 0 // PB0 pin 5
+#define lsensepin 3 // PB3 ADC3 pin 2
+#define rsensepin 1 // PB2 ADC1 pin 7
+#define ledpin 4 //PB4 pin 3
+
+// some behavioral numbers
+// these are millisecond values
+#define steplength 300//300
+#define smallturn 200 //200
+#define bigturn 500  //500
+#define memtime 1000  //1000
+
+#define left 0
+#define right 1
+#define both 2
+#define straight 2
+
+#define edge 0
+#define white 1
+#define black 2
+
+#define PWM 64  //64
+
+// variables
+uint8_t lspd, rspd, batteryStart, batteryVal; // motor speeds
+uint16_t lsenseval, rsenseval, lwhiteval, rwhiteval; // sensor values
+unsigned long moveEndTime = 0;
+
+void followEdge();
+void move(uint8_t lspeed, uint8_t rspeed);
+void stop();
+void senseInit();
+void flashLED(uint8_t flashes);
+long readVcc();
+
+// just for convenience and simplicity (HIGH is off)
+#define ledoff PORTB  &= ~(1 << 4)
+#define ledon PORTB |= (1 << 4)
+
+
+
+void setup(){
+
+	/*For Fast PWM of 62.500 kHz (prescale factor of 1)
+	Use these two lines in the setup function:
+
+	TCCR0A = _BV(COM0A1) | _BV(COM0B1) | _BV(WGM01) | _BV(WGM00);
+	TCCR0B = _BV(CS00);
+
+	/*And modify the line in the wiring.c function in the Arduino program files
+	hardware\arduino\cores\arduino\wiring.c :
+	#define MICROSECONDS_PER_TIMER0_OVERFLOW (clockCyclesToMicroseconds(1 * 256))
+
+	For Phase-correct PWM of 31.250 kHz (prescale factor of 1)
+	Use these two lines in the setup function:*/
+
+	TCCR0A = _BV(COM0A1) | _BV(COM0B1) | _BV(WGM00);
+	TCCR0B = _BV(CS00);
+
+	/*And modify the line in the wiring.c function in the Arduino program files
+	hardware\arduino\cores\arduino\wiring.c :
+	#define MICROSECONDS_PER_TIMER0_OVERFLOW (clockCyclesToMicroseconds(1 * 510))
+	*/
+
+	// setup pins
+
+	pinMode(lmotorpin, OUTPUT);
+	pinMode(rmotorpin, OUTPUT);
+	pinMode(2, INPUT); // these are the sensor pins, but the analog
+	pinMode(3, INPUT); // and digital functions use different numbers
+	ledoff;
+	pinMode(ledpin, OUTPUT);
+	analogWrite(lmotorpin, 0);
+	analogWrite(rmotorpin, 0);
+
+	lspd = baseLeftSpeed;
+	rspd = baseRightSpeed;
+
+	// give a few second pause to set the thing on a white surface
+	// the LED will flash during this time
+
+
+	flashLED(3);
+	delay(PWM*100);
+	senseInit();
+
+	ledon;
+}
+
+void loop(){
+	// followEdge() contains an infinite loop, so this loop really isn't necessary
+	followEdge();
+}
+
+void followEdge(){
+	// now look for an edge
+
+	//unsigned long moveEndTime = 0; // the millis at which to stop
+	unsigned long randomBits = micros(); // for a random walk
+	unsigned long prior = 0; // after edge encounter set to millis + memtime
+	uint8_t priorDir = left; //0=left, 1=right, 2=both
+	uint8_t lastSense = white; //0=edge, 1=both white, 2=both black
+	uint8_t lastMove = left; //0=left, 1=right, 2=straight
+	int8_t motorSense = 0;
+	int8_t lastmotorSense = 0;
+
+	batteryStart = readVcc();
+
+
+	while(true){
+
+                // refill the random bits if needed
+		if(randomBits == 0){ randomBits = micros(); }
+
+		lsenseval = 0;
+		rsenseval = 0;
+
+		for(uint8_t i=0; i<8; i++){
+			lsenseval += analogRead(lsensepin);
+			rsenseval += analogRead(rsensepin);
+			}
+
+		/* Because the robot does not have a way to regulate battery voltage
+		These lines measures the battery voltage compares it the voltage at
+		the start of the program. As the power fades from the battery it ups
+		the motor duty cycle. Keeping the motors running even as the battery
+		runs down */
+
+		batteryVal = readVcc(); //reads current battery voltage
+		if(batteryVal > batteryStart){
+			motorSense = batteryVal - batteryStart;
+
+			if(motorSense != lastmotorSense && lspd <= 254){
+				motorSense = motorSense - lastmotorSense;
+				motorSense = round(motorSense * .75);
+				lspd = lspd + motorSense;
+				rspd = rspd + motorSense;
+				}
+
+			lastmotorSense = batteryVal - batteryStart;
+	}
+		// Here is the important part
+		// There are four possible states: both white, both black, one of each
+		// The behavior will depend on current and previous states
+
+		if((lsenseval > lwhiteval) && (rsenseval > rwhiteval)){
+			// both white - if prior turn toward black, else random walk
+			if(lastSense == black || millis() < prior){
+				// turn toward last black or left
+				switch (priorDir) {
+					case left:
+						moveEndTime = millis()+smallturn;
+						move(0, rspd); // turn left
+						lastMove = left;
+						break;
+					case right:
+						moveEndTime = millis()+smallturn;
+						move(lspd, 0); // turn right
+						lastMove = right;
+						break;
+					case both:
+						moveEndTime = millis()+bigturn;
+						move(0, rspd); // turn left a lot
+						lastMove = left;
+						break;
+				}
+
+			}else{
+				// random walk
+				if(millis() < moveEndTime){
+					// just continue moving
+				}else{
+					if(lastMove == straight){ //0=straight, 1=left, 2=right
+						moveEndTime = millis()+steplength;
+						move(lspd, rspd); // go straight
+						lastMove = straight;
+					}else{
+						if(randomBits & 1){
+							moveEndTime = millis()+smallturn;
+							move(0, rspd); // turn left
+							lastMove = left;
+						}else{
+							moveEndTime = millis()+smallturn;
+							move(lspd, 0); // turn right
+							lastMove = right;
+						}
+						randomBits >>= 1;
+					}
+				}
+			}
+			lastSense = white;
+
+		}else if((lsenseval > lwhiteval) || (rsenseval > rwhiteval)){
+			// one white, one black - this is the edge
+			// just go straight
+			moveEndTime = millis()+steplength;
+			move(lspd, rspd); // go straight
+			lastMove = straight; //0=straight, 1=left, 2=right
+			lastSense = edge;
+			prior = millis()+memtime;
+			if(lsenseval > lwhiteval*leftSensitivity){
+				// the right one is black
+				priorDir = right;
+			}else{
+				// the left one is black
+				priorDir = left;
+			}
+
+		}else{
+			// both black - if prior turn toward white, else random walk
+			if(lastSense == white || millis() < prior){
+				// turn toward last white or left
+				switch (priorDir) {
+					case left:
+						moveEndTime = millis()+smallturn;
+						move(lspd, 0);  // turn left
+						lastMove = right;
+						break;
+					case right:
+						moveEndTime = millis()+smallturn;
+						move(0, rspd); // turn left
+						lastMove = left;
+						break;
+					case both:
+						moveEndTime = millis()+bigturn;
+						move(lspd, 0); // turn right a lot
+						lastMove = right;
+						break;
+					}
+			}else{
+				// random walk
+				if(millis() < moveEndTime){
+					// just continue moving
+				}else{
+					if(lastMove == straight){
+						moveEndTime = millis()+steplength;
+						move(lspd, rspd); // go straight
+						lastMove = straight;
+					}else{
+						if(randomBits & 1){
+							moveEndTime = millis()+smallturn;
+							move(0, rspd); // turn left
+							lastMove = left;
+						}else{
+							moveEndTime = millis()+smallturn;
+							move(lspd, 0); // turn right
+							lastMove = right;
+						}
+						randomBits >>= 1;
+					}
+				}
+			}
+			lastSense = black;
+		}
+	}
+}
+
+void move(uint8_t lspeed, uint8_t rspeed){
+	analogWrite(lmotorpin, lspeed);
+	analogWrite(rmotorpin, rspeed);
+}
+
+void stop(){
+	analogWrite(lmotorpin, 0);
+	analogWrite(rmotorpin, 0);
+}
+
+// stores the average of 16 readings as a white value
+void senseInit(){
+	lwhiteval = 0;
+	rwhiteval = 0;
+
+	ledon;
+	delay(PWM*10);
+
+		for(uint8_t i=0; i<16; i++){
+			lwhiteval += analogRead(lsensepin);
+			delay(PWM*1);
+			rwhiteval += analogRead(rsensepin);
+			delay(PWM*9);
+		}
+
+	lwhiteval >>= 4;
+	rwhiteval >>= 4;
+	lwhiteval = lwhiteval*leftSensitivity;
+	rwhiteval = rwhiteval*rightSensitivity;  //maybe try mapping this instead?
+
+	ledoff;
+}
+
+void flashLED(uint8_t flashes){
+	while(flashes){
+		flashes--;
+		ledon;
+		delay(PWM*200);
+		ledoff;
+		if(flashes){ delay(PWM*500); }
+	}
+	while(flashes){
+		flashes--;
+		ledon;
+		delay(PWM*100);
+		ledoff;
+		if(flashes){ delay(PWM*200); }
+	}
+}
+
+long readVcc() {
+  // Read 1.1V reference against AVcc
+  // set the reference to Vcc and the measurement to the internal 1.1V reference
+    ADMUX = _BV(MUX3) | _BV(MUX2);
+
+  delay(PWM*2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Start conversion
+  while (bit_is_set(ADCSRA,ADSC)); // measuring
+
+  uint8_t low  = ADCL; // must read ADCL first - it then locks ADCH
+  uint8_t high = ADCH; // unlocks both
+
+  long result = (high<<8) | low;
+
+  return result;
+}
