@@ -21,8 +21,8 @@ It is in the public domain, so do what you will with it.
 // ExponentialFilter<long> ADCFilter(10, 0);
 // Here are some parameters that you need to adjust for your setup
 // Base speeds are the motor pwm values. Adjust them for desired motor speeds.
-#define baseLeftSpeed 40 //22
-#define baseRightSpeed 40 //22
+#define baseLeftSpeed 35 //22
+#define baseRightSpeed 35 //22
 
 // This determines sensitivity in detecting black and white
 // measurment is considered white if it is > whiteValue*n/4
@@ -54,10 +54,10 @@ It is in the public domain, so do what you will with it.
 #define white 1
 #define black 2
 
-#define PWM 64  //64 Use 1 when the wiring.h has not been altered.
+#define PWM 1  //64 Use 1 when the wiring.h has not been altered.
 
 // Global Variables
-uint8_t lspd, rspd; // motor speeds
+uint16_t lspd, rspd; // motor speeds
 uint16_t lsenseval, rsenseval, lwhiteval, rwhiteval; // sensor values
 unsigned long moveEndTime = 0;
 
@@ -88,12 +88,12 @@ void setup(){
 	#define MICROSECONDS_PER_TIMER0_OVERFLOW (clockCyclesToMicroseconds(1 * 256))
 
 	For Phase-correct PWM of 31.250 kHz (prescale factor of 1)
-	Use these two lines in the setup function:*/
+	Use these two lines in the setup function:
 
 	TCCR0A = _BV(COM0A1) | _BV(COM0B1) | _BV(WGM00);
 	TCCR0B = _BV(CS00);
 
-	/*And modify the line in the wiring.c function in the Arduino program files
+	And modify the line in the wiring.c function in the Arduino program files
 	hardware\arduino\cores\arduino\wiring.c :
 	#define MICROSECONDS_PER_TIMER0_OVERFLOW (clockCyclesToMicroseconds(1 * 510))
 	*/
@@ -125,52 +125,47 @@ void setup(){
 
 void loop(){
 	// followEdge() contains an infinite loop, so this loop really isn't necessary
-	senseRead();
+
 	followEdge();
 }
 
 void followEdge(){
 	// now look for an edge
-
 	unsigned long randomBits = 0; // for a random walk
 	unsigned long prior = 0; // after edge encounter set to millis + memtime
 	uint8_t priorDir = left; //0=left, 1=right, 2=both
 	uint8_t lastSense = white; //0=edge, 1=both white, 2=both black
 	uint8_t lastMove = left; //0=left, 1=right, 2=straight
-	//uint16_t motionVall, motionValr, lastmotionVall, lastmotionValr;
-
-
+	uint16_t lastlsenseval, lastrsenseval;
+	uint32_t nextTestTime = millis() + 500;
 
 	while(true){
 
-			/*motionVall = lsenseval;
-			motionValr = rsenseval;
+		senseRead();
 
-			if (motionVall <= lastmotionVall / 0.99 && motionVall >= lastmotionVall * 0.99){
-				if (motionValr <= lastmotionValr / 0.99 && motionValr >= lastmotionValr * 0.99){
-							ledon;
-							delay(700);
-							ledoff;
-							delay(700);
-							ledon;
-							//lspd ++;
-							//rspd ++;
+		if (nextTestTime < millis()){
+							nextTestTime = millis() + 500;
+							//flashLED(3);
+			if (lsenseval <= lastlsenseval / 0.96 && lsenseval >= lastlsenseval * 0.96){
+				if (rsenseval <= lastrsenseval / 0.96 && rsenseval >= lastrsenseval * 0.96){
+							if(lspd < 0 || lspd >= 254){
+								lspd = baseLeftSpeed;
+								rspd = baseRightSpeed;
+							}else{
+							lspd ++;
+							rspd ++;
+										}
 					}
 				}
+		lastlsenseval = lsenseval;
+		lastrsenseval = rsenseval;
+	}
 
-			lastmotionVall = motionVall;
-			lastmotionValr = motionValr;*/
-
-	if(moveEndTime >= millis()){	senseRead();}
-
-		if(randomBits == 0){ randomBits = micros(); }   // refill the random bits if needed
-
+	if(randomBits == 0){ randomBits = micros(); }   // refill the random bits if needed
 
 		// Here is the important part
 		// There are four possible states: both white, both black, one of each
 		// The behavior will depend on current and previous states
-
-
 		if((lsenseval > lwhiteval) && (rsenseval > rwhiteval)){
 			// both white - if prior turn toward black, else random walk
 			if(lastSense == black || millis() < prior){
@@ -191,11 +186,11 @@ void followEdge(){
 						move(0, rspd); // turn left a lot
 						lastMove = left;
 						break;
-				}
+						}
 
 			}else if(millis() < moveEndTime){
 					//random walk just continue moving
-				}else if(lastMove == straight){ //0=straight, 1=left, 2=right
+				}else if(lastMove == straight){
 						moveEndTime = millis()+steplength;
 						move(lspd, rspd); // go straight
 						lastMove = straight;
@@ -209,22 +204,21 @@ void followEdge(){
 							lastMove = right;
 						}
 						randomBits >>= 1;
-			lastSense = white;
+						lastSense = white;
 
 		}else if((lsenseval > lwhiteval) || (rsenseval > rwhiteval)){
 			// one white, one black - this is the edge - just go straight
 			moveEndTime = millis()+steplength;
 			move(lspd, rspd); // go straight
-			lastMove = straight; //0=straight, 1=left, 2=right
+			lastMove = straight;
 			lastSense = edge;
 			prior = millis()+memtime;
 			if(lsenseval > lwhiteval*leftSensitivity){
-				// the right one is black
-				priorDir = right;
-			}else{
-				// the left one is black
-				priorDir = left;
-			}
+				priorDir = right; // the right one is black
+				}else{
+					priorDir = left;
+					}// the left one is black
+
 
 		}else if(lastSense == white || millis() < prior){
 				// both black - if prior turn toward white, else random walk
@@ -262,10 +256,9 @@ void followEdge(){
 							lastMove = right;
 							}
 							randomBits >>= 1;
-				lastSense = black;
-		}
+							lastSense = black;
+						}
 	}
-//}
 
 void move(uint8_t lspeed, uint8_t rspeed){
 	analogWrite(lmotorpin, lspeed);
@@ -279,6 +272,7 @@ void stop(){
 
 // stores the average of 16 readings as a white value
 void senseInit(){
+
 	lwhiteval = 0;
 	rwhiteval = 0;
 
@@ -296,7 +290,6 @@ void senseInit(){
 	rwhiteval >>= 4;
 	lwhiteval = lwhiteval*leftSensitivity;
 	rwhiteval = rwhiteval*rightSensitivity;  //maybe try mapping this instead?
-
 	ledoff;
 }
 
@@ -307,13 +300,14 @@ void senseRead(){
 
 		for(uint8_t i=0; i<8; i++){
 			lsenseval += analogRead(lsensepin);
-			delay(1);//what if I added delays to let analogRead stablize?
+			//delay(1);
 			rsenseval += analogRead(rsensepin);
-			delay(9);
+			//delay(9);
 			}
 }
 
 void flashLED(uint8_t flashes){
+
 	while(flashes){
 		flashes--;
 		ledon;
@@ -321,6 +315,7 @@ void flashLED(uint8_t flashes){
 		ledoff;
 		if(flashes){ delay(PWM*500); }
 	}
+
 	while(flashes){
 		flashes--;
 		ledon;
